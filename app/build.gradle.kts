@@ -63,5 +63,5 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 
-    implementation ("com.github.mik3y:usb-serial-for-android:3.5.0")
+    implementation (libs.usb.serial.android)
 }
