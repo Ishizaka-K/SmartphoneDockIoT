@@ -18,46 +18,57 @@ import java.nio.charset.Charset
 class IotSerialManager(private val context: Context) {
 
     companion object {
-        private const val ACTION_USB_PERMISSION = "com.example.irremote.USB_PERMISSION"
-        private const val BAUD_RATE = 115200 // Arduinoスケッチと一致させる
+        // パッケージに合わせる（任意の一意文字列でも動きますが合わせる方が安全）
+        private const val ACTION_USB_PERMISSION = "com.example.iotapplication.USB_PERMISSION"
+        private const val BAUD_RATE = 115200
     }
 
-    private var usbManager: UsbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+    private val usbManager: UsbManager =
+        context.getSystemService(Context.USB_SERVICE) as UsbManager
     private var serialPort: UsbSerialPort? = null
 
-    // 接続状態を公開するStateFlow
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected
+
+    // 二重登録防止
+    private var receiverRegistered = false
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == ACTION_USB_PERMISSION) {
-                synchronized(this) {
-                    val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                    if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                        device?.let {
-                            openDevice(it)
-                        }
-                    } else {
-                        // 許可が得られなかった場合
-                        _isConnected.value = false
-                    }
+                val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                if (granted && device != null) {
+                    openDevice(device)
+                } else {
+                    _isConnected.value = false
                 }
             }
         }
     }
 
     fun register() {
-        val filter = IntentFilter(ACTION_USB_PERMISSION)
-        context.registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        if (!receiverRegistered) {
+            val filter = IntentFilter(ACTION_USB_PERMISSION)
+            // 互換性重視：フラグ引数なしのオーバーロードを使用
+            context.registerReceiver(usbReceiver, filter)
+            receiverRegistered = true
+        }
     }
 
     fun unregister() {
-        context.unregisterReceiver(usbReceiver)
+        if (receiverRegistered) {
+            try {
+                context.unregisterReceiver(usbReceiver)
+            } catch (_: Exception) {
+                // 既に解除済みでも落ちないように
+            } finally {
+                receiverRegistered = false
+            }
+        }
         close()
     }
 
-    // 接続処理を開始する関数
     fun connect() {
         val availableDrivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
         if (availableDrivers.isEmpty()) {
@@ -67,8 +78,12 @@ class IotSerialManager(private val context: Context) {
         val driver = availableDrivers[0]
         val device = driver.device
         if (!usbManager.hasPermission(device)) {
-            val permissionIntent = PendingIntent.getBroadcast(context, 0, Intent(ACTION_USB_PERMISSION),
-                PendingIntent.FLAG_IMMUTABLE)
+            val permissionIntent = PendingIntent.getBroadcast(
+                context,
+                0,
+                Intent(ACTION_USB_PERMISSION),
+                PendingIntent.FLAG_IMMUTABLE
+            )
             usbManager.requestPermission(device, permissionIntent)
         } else {
             openDevice(device)
@@ -78,64 +93,58 @@ class IotSerialManager(private val context: Context) {
     private fun openDevice(device: UsbDevice) {
         val driver = UsbSerialProber.getDefaultProber().probeDevice(device)
         val connection = usbManager.openDevice(device) ?: return
-        serialPort = driver?.ports?.get(0)
+        serialPort = driver?.ports?.getOrNull(0)
         serialPort?.apply {
             open(connection)
             setParameters(BAUD_RATE, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
-            _isConnected.value = true // 接続成功
+            _isConnected.value = true
         }
     }
 
     fun close() {
-        serialPort?.close()
-        serialPort = null
-        _isConnected.value = false // 接続を切断
+        try {
+            serialPort?.close()
+        } catch (_: Exception) {
+        } finally {
+            serialPort = null
+            _isConnected.value = false
+        }
     }
 
     suspend fun readData(timeoutMillis: Int = 5000): String? {
         return withContext(Dispatchers.IO) {
-            if (serialPort == null) return@withContext null
-
+            val port = serialPort ?: return@withContext null
             val buffer = ByteArray(1024)
-            val stringBuilder = StringBuilder()
-            val startTime = System.currentTimeMillis()
+            val sb = StringBuilder()
+            val start = System.currentTimeMillis()
 
-            while (System.currentTimeMillis() - startTime < timeoutMillis) {
+            while (System.currentTimeMillis() - start < timeoutMillis) {
                 try {
-                    val len = serialPort?.read(buffer, timeoutMillis) ?: 0
+                    val len = port.read(buffer, timeoutMillis)
                     if (len > 0) {
-                        stringBuilder.append(String(buffer, 0, len, Charset.forName("UTF-8")))
-                        val dataString = stringBuilder.toString()
-
-                        // Arduinoからの応答を処理
-                        if (dataString.contains("IR_RAW:")) {
-                            // 生データを受信
-                            val startIndex = dataString.indexOf("IR_RAW:")
-                            val endIndex = dataString.indexOf('\n', startIndex)
-                            if (endIndex != -1) {
-                                val irData = dataString.substring(startIndex, endIndex).trim()
-                                return@withContext irData
-                            }
-                        } else if (dataString.contains("Waiting for IR signal...")) {
-                            // 受信待機中メッセージを検出、次の応答を待つ
-                            stringBuilder.clear() // バッファをクリアしてIR_RAW:を待機
+                        sb.append(String(buffer, 0, len, Charset.forName("UTF-8")))
+                        val data = sb.toString()
+                        if (data.contains("IR_RAW:")) {
+                            val s = data.indexOf("IR_RAW:")
+                            val e = data.indexOf('\n', s)
+                            if (e != -1) return@withContext data.substring(s, e).trim()
+                        } else if (data.contains("Waiting for IR signal...")) {
+                            sb.clear()
                         }
                     }
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     return@withContext null
                 }
             }
-            return@withContext null // タイムアウト
+            null
         }
     }
 
     suspend fun writeData(data: String) {
         withContext(Dispatchers.IO) {
-            if (serialPort == null) return@withContext
+            val port = serialPort ?: return@withContext
             try {
-                // Arduinoは改行文字でコマンドの終わりを判断するため、末尾に改行を追加
-                val bytes = (data + "\n").toByteArray(Charset.forName("UTF-8"))
-                serialPort?.write(bytes, 1000)
+                port.write((data + "\n").toByteArray(Charset.forName("UTF-8")), 1000)
             } catch (_: Exception) {
             }
         }
