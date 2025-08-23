@@ -1,12 +1,8 @@
-// MainActivity.kt
 package com.example.iotapplication
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.ViewModelProvider
-import androidx.lifecycle.ViewModelProvider.Factory
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -15,23 +11,26 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.launch
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 
 class IotViewModelFactory(
-    private val iotSerialManager: IotSerialManager
-) : Factory {
+    private val manager: IotSerialManager
+) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(IotViewModel::class.java)) {
-            return IotViewModel(iotSerialManager) as T
+            return IotViewModel(manager) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
     }
@@ -39,41 +38,37 @@ class IotViewModelFactory(
 
 class MainActivity : ComponentActivity() {
 
-    private lateinit var iotSerialManager: IotSerialManager
+    private lateinit var manager: IotSerialManager
     private lateinit var viewModel: IotViewModel
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        iotSerialManager = IotSerialManager(applicationContext)
-        viewModel = ViewModelProvider(this, IotViewModelFactory(iotSerialManager))
+        manager = IotSerialManager(applicationContext)
+        viewModel = ViewModelProvider(this, IotViewModelFactory(manager))
             .get(IotViewModel::class.java)
 
-        setContent { IRRemoteApp(viewModel) }
+        setContent {
+            Surface {
+                IRRemoteApp(viewModel)
+            }
+        }
     }
 
     override fun onStart() {
         super.onStart()
-        // 権限ブロードキャストを先に登録しておく
-        iotSerialManager.register()
+        manager.register() // USB権限ブロードキャスト登録
     }
 
     override fun onStop() {
-        // 画面が背面に回ったら受信解除＆ポートクローズ
-        iotSerialManager.unregister()
+        manager.unregister() // 受信解除＆ポートクローズ
         super.onStop()
     }
 }
 
 @Composable
 fun IRRemoteApp(viewModel: IotViewModel) {
-    val scope = rememberCoroutineScope()
-    val receivedSignal by viewModel.receivedSignal.collectAsState()
     val isConnected by viewModel.isConnected.collectAsState()
-
-    val displayText =
-        if (!isConnected) "未接続"
-        else receivedSignal?.takeIf { it.isNotBlank() } ?: "接続済み（信号待機中）"
+    val state by viewModel.signalState.collectAsState()
 
     Column(
         Modifier
@@ -82,35 +77,55 @@ fun IRRemoteApp(viewModel: IotViewModel) {
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Button(
-            onClick = { viewModel.onToggleConnectionClicked() },
+            onClick = { viewModel.toggleConnection() },
             modifier = Modifier.fillMaxWidth()
         ) {
             Text(if (isConnected) "切断" else "接続")
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
-
         Button(
-            onClick = { scope.launch { viewModel.onReceiveClicked() } },
+            onClick = { viewModel.receive() },
             modifier = Modifier.fillMaxWidth(),
             enabled = isConnected
         ) { Text("受信") }
 
-        Spacer(modifier = Modifier.height(8.dp))
-
         Button(
-            onClick = { scope.launch { viewModel.onSendClicked() } },
+            onClick = { viewModel.send() },
             modifier = Modifier.fillMaxWidth(),
             enabled = isConnected
         ) { Text("送信") }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(Modifier.height(16.dp))
 
-        Text(
-            text = displayText ?: "",
-            style = MaterialTheme.typography.bodyLarge,
-            modifier = Modifier.fillMaxWidth(),
-            color = MaterialTheme.colorScheme.onBackground
-        )
+        when (state) {
+            is SignalState.Idle -> StatusText("未接続または待機中", Color.Gray)
+            is SignalState.Waiting -> {
+                CircularProgressIndicator()
+                StatusText("受信待機中...", Color.Gray)
+            }
+            is SignalState.Received -> {
+                val raw = (state as SignalState.Received).data
+                StatusText(
+                    // 例: "IR_RAW:123,456,..." をそのまま表示
+                    raw,
+                    MaterialTheme.colorScheme.onBackground
+                )
+            }
+            is SignalState.Sent -> StatusText("信号を送信しました", Color(0xFF2E7D32))
+            is SignalState.Error -> StatusText(
+                (state as SignalState.Error).message,
+                Color(0xFFC62828)
+            )
+        }
     }
+}
+
+@Composable
+private fun StatusText(text: String, color: Color) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodyLarge,
+        modifier = Modifier.fillMaxWidth(),
+        color = color
+    )
 }
