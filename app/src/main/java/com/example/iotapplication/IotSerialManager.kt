@@ -22,7 +22,6 @@ class IotSerialManager(private val context: Context) {
     private val opening = AtomicBoolean(false) // いま接続処理中かどうか
 
     companion object {
-        // パッケージに合わせる（任意の一意文字列でも動きますが合わせる方が安全）
         private const val ACTION_USB_PERMISSION = "com.example.iotapplication.USB_PERMISSION"
         private const val BAUD_RATE = 115200
     }
@@ -40,7 +39,6 @@ class IotSerialManager(private val context: Context) {
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == ACTION_USB_PERMISSION) {
-                // ★ ここを API 33+ で型付きに
                 val device: UsbDevice? = if (android.os.Build.VERSION.SDK_INT >= 33) {
                     intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
                 } else {
@@ -52,10 +50,8 @@ class IotSerialManager(private val context: Context) {
                 if (granted && device != null) {
                     openDevice(device)
                 } else {
-                    // ★ 念のため：device が取れなかったが許可は降りたケースのフォールバック
                     if (granted) {
-                        // 既に権限はあるはずなので通常の connect で再プローブ
-                        opening.set(false)      // connect() が弾かないように解除
+                        opening.set(false)
                         connect()
                     } else {
                         opening.set(false)
@@ -79,7 +75,6 @@ class IotSerialManager(private val context: Context) {
             try {
                 context.unregisterReceiver(usbReceiver)
             } catch (_: Exception) {
-                // 既に解除済みでも落ちないように
             } finally {
                 receiverRegistered = false
             }
@@ -88,7 +83,6 @@ class IotSerialManager(private val context: Context) {
     }
 
     fun connect() {
-        // 既に開いている/開こうとしているなら何もしない
         if (_isConnected.value || serialPort != null) return
         if (!opening.compareAndSet(false, true)) return
 
@@ -106,26 +100,23 @@ class IotSerialManager(private val context: Context) {
                 context, 0, Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE
             )
             usbManager.requestPermission(device, permissionIntent)
-            // permission の結果は BroadcastReceiver で受けて openDevice() へ
-            return // opening は true のまま（openDevice 側で false に戻す）
+            return
         } else {
-            openDevice(device) // 成否に関わらず openDevice 内で opening を false に戻す
+            openDevice(device)
         }
     }
 
     private fun openDevice(device: UsbDevice) {
         try {
-            // 既に開いているなら何もしない
             if (serialPort != null) return
 
             val driver = UsbSerialProber.getDefaultProber().probeDevice(device)
             val connection = usbManager.openDevice(device) ?: return
 
             val port = driver?.ports?.getOrNull(0) ?: return
-            port.open(connection) // ← ここが二重に呼ばれると "Already open"
+            port.open(connection)
             port.setParameters(BAUD_RATE, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
 
-            // （任意・推奨）他アプリ相当の初期化
             try { port.setDTR(true); port.setRTS(true) } catch (_: Exception) {}
             try { port.purgeHwBuffers(true, true) } catch (_: Exception) {}
             try { Thread.sleep(50) } catch (_: InterruptedException) {}
@@ -133,7 +124,6 @@ class IotSerialManager(private val context: Context) {
             serialPort = port
             _isConnected.value = true
         } finally {
-            // ここで必ず "接続処理中" を解除
             opening.set(false)
         }
     }
@@ -180,10 +170,8 @@ class IotSerialManager(private val context: Context) {
         withContext(Dispatchers.IO) {
             val port = serialPort ?: return@withContext
             try {
-                // ★ 追加：送信前にTXをクリーン、直前の断片を避ける
                 try { port.purgeHwBuffers(false, true) } catch (_: Exception) {}
 
-                // ★ 変更：CRLF で送る
                 port.write((data + "\r\n").toByteArray(Charset.forName("UTF-8")), 1000)
             } catch (_: Exception) {
             }

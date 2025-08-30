@@ -55,12 +55,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        // 権限ブロードキャストを先に登録しておく
         iotSerialManager.register()
     }
 
     override fun onStop() {
-        // 画面が背面に回ったら受信解除＆ポートクローズ
         iotSerialManager.unregister()
         super.onStop()
     }
